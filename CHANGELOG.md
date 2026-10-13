@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Stop a freshly opened output stream from being corrected at up to 4% speed
+  for several seconds after playback starts. On some backends (observed with
+  ALSA over PulseAudio/PipeWire) the reported output delay of a cold stream
+  overshoots by a few hundred milliseconds and then relaxes while the audio
+  plays gaplessly, and the sync error moves with it. Corrections are now held
+  back until 500ms observation-window floors stay within a 10ms range over
+  a baseline window and two seconds of comparisons, independent of callback
+  size (capped at 10s after playback starts). Speed corrections are limited to
+  0.5% for the first 20s after a start. Callback gaps of 500ms or more discard
+  settling evidence. The all-time delta floor used for reanchors is re-seeded
+  from the observed floor each time the delay settles.
+
 ## [0.3.7](https://github.com/Sendspin/sendspin-rs/compare/v0.3.6...v0.3.7) - 2026-08-21
 
 ### Fixed

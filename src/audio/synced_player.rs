@@ -3,7 +3,7 @@
 
 use crate::audio::gain::{GainControl, GainRamp};
 use crate::audio::sync_correction::{
-    CorrectionPlanner, CorrectionSchedule, EngageGate, SyncErrorFilter,
+    CorrectionPlanner, CorrectionSchedule, EngageGate, OutputDelaySettle, SyncErrorFilter,
 };
 use crate::audio::{AudioBuffer, AudioFormat};
 use crate::error::Error;
@@ -351,6 +351,21 @@ fn us_to_ms(us: u64) -> f64 {
 /// Queue depth below which the edge-triggered "queue low" debug line fires.
 const QUEUE_LOW_WATER_US: u64 = 100_000;
 
+/// Upper bound on how long after playback starts the output delay is given to
+/// settle before corrections are allowed regardless (see
+/// [`OutputDelaySettle`]). A backend whose delay never settles must not
+/// disable drift correction for the whole stream.
+const OUTPUT_DELAY_SETTLE_MAX: Duration = Duration::from_secs(10);
+
+/// How long after playback starts speed corrections are limited to
+/// [`STARTUP_MAX_SPEED_CORRECTION`]. Whatever residue of the start-up
+/// transient outlasts the settle grace period must not be corrected at the
+/// full rate, which is audible as pitch.
+const STARTUP_GENTLE_WINDOW: Duration = Duration::from_secs(20);
+
+/// Speed-correction cap during [`STARTUP_GENTLE_WINDOW`]: 0.5%, under 9 cents.
+const STARTUP_MAX_SPEED_CORRECTION: f64 = 0.005;
+
 /// Queue depth required to log recovery after a low-queue warning. Kept above
 /// [`QUEUE_LOW_WATER_US`] so a queue hovering at one boundary cannot flood the
 /// log with low/recovered pairs.
@@ -386,6 +401,10 @@ struct CallbackStats {
     /// Corrections the planner requested that the engage gate suppressed
     /// while awaiting a sustained error; the sampling key for its trace line.
     gate_suppressed_corrections: u64,
+    /// Corrections the planner requested while the output delay was still
+    /// settling after stream start, which were suppressed; the sampling key
+    /// for its trace line.
+    delay_transient_suppressed_corrections: u64,
     /// Correction episodes started (idle -> correcting transitions, including
     /// reanchor engagements). Mirrors the "Sync correction engaged" debug
     /// line 1:1 so the generation summary can answer whether the corrector
@@ -733,6 +752,8 @@ impl SyncedPlayer {
         let channels = format.channels as usize;
         let sample_rate = format.sample_rate;
         let planner = CorrectionPlanner::new();
+        let startup_planner =
+            CorrectionPlanner::with_max_speed_correction(STARTUP_MAX_SPEED_CORRECTION);
         let mut error_filter = SyncErrorFilter::new();
         let mut engage_gate = EngageGate::new();
         let mut last_frame = vec![i32::EQUILIBRIUM; channels];
@@ -742,6 +763,9 @@ impl SyncedPlayer {
         let mut started = false;
         let mut handoff_warned = false;
         let mut sync_settle_logged = false;
+        // Output-delay settling after stream start; see OutputDelaySettle.
+        let mut delay_settle = OutputDelaySettle::new();
+        let mut started_at: Option<Instant> = None;
         let mut last_callback_instant: Option<Instant> = None;
         let mut last_playback_delta_us: Option<u64> = None;
         // Running minimum of the presentation-latency snapshot, reset per
@@ -850,6 +874,8 @@ impl SyncedPlayer {
                         error_filter.reset();
                         engage_gate.reset();
                         min_playback_delta_us = u64::MAX;
+                        delay_settle.reset();
+                        started_at = None;
                         stats.reset_for_generation();
                         for sample in last_frame.iter_mut() {
                             *sample = i32::EQUILIBRIUM;
@@ -894,6 +920,26 @@ impl SyncedPlayer {
                     }
                     last_playback_delta_us = Some(playback_delta_us);
                     min_playback_delta_us = min_playback_delta_us.min(playback_delta_us);
+                    let delay_was_settled = delay_settle.is_settled();
+                    delay_settle.update(callback_instant, playback_delta_us);
+                    if let Some(floor_us) = delay_settle
+                        .settled_floor_us()
+                        .filter(|_| !delay_was_settled)
+                    {
+                        // Each new stable interval supersedes the transient's
+                        // measurements. Anchor to its floor, not a callback
+                        // sample that may flap upward by an engine period.
+                        min_playback_delta_us = floor_us;
+                        error_filter.reset();
+                        engage_gate.reset();
+                        log::debug!(
+                            "Output delay settled at {:.1}ms; corrections enabled: callback={}, suppressed_during_transient={}, generation={}",
+                            us_to_ms(floor_us),
+                            stats.callbacks,
+                            stats.delay_transient_suppressed_corrections,
+                            generation,
+                        );
+                    }
 
                     // try_lock: skip sync if contended rather than blocking
                     // the audio thread. force_reanchor is sticky in the
@@ -1043,6 +1089,7 @@ impl SyncedPlayer {
                             }
                             if !started {
                                 started = true;
+                                started_at = Some(callback_instant);
                                 log::debug!(
                                     "Audio playback started: callback={}, cursor={}µs, queued={:.1}ms, buffers={}, silent_callbacks_before_start={}, sync_lock_misses={}",
                                     stats.callbacks,
@@ -1068,8 +1115,19 @@ impl SyncedPlayer {
                             // gaplessly (see SyncErrorFilter); plan against
                             // the window floor, never one wake's snapshot.
                             let error_us = error_filter.update(raw_error_us);
-                            let planned_schedule =
-                                planner.plan(error_us, sample_rate, schedule.is_correcting());
+                            let in_startup_window = started_at.is_some_and(|at| {
+                                callback_instant.duration_since(at) < STARTUP_GENTLE_WINDOW
+                            });
+                            let active_planner = if in_startup_window {
+                                &startup_planner
+                            } else {
+                                &planner
+                            };
+                            let planned_schedule = active_planner.plan(
+                                error_us,
+                                sample_rate,
+                                schedule.is_correcting(),
+                            );
                             // Corrections mutate audible frames: engage only
                             // on sustained evidence over a warm filter (see
                             // EngageGate).
@@ -1099,7 +1157,39 @@ impl SyncedPlayer {
                             // estimate itself; correcting for it chases
                             // filter noise audibly. Trust the server's audio
                             // until settled, honoring only gross reanchors.
-                            let new_schedule = if sync_settled || planned_schedule.reanchor {
+                            // A cold output stream reports a delay that
+                            // overshoots and then relaxes over several
+                            // seconds while the audio plays gaplessly.
+                            // Correcting against it would speed playback up
+                            // and then slow it down (an audible warble) for
+                            // an error that resolves itself, so hold
+                            // corrections until the delay has settled or the
+                            // grace period runs out.
+                            let output_delay_transient = !delay_settle.is_settled()
+                                && started_at.is_some_and(|at| {
+                                    callback_instant.duration_since(at) < OUTPUT_DELAY_SETTLE_MAX
+                                });
+                            let new_schedule = if output_delay_transient {
+                                if planned_schedule.is_correcting() {
+                                    stats.delay_transient_suppressed_corrections += 1;
+                                    if trace_logging
+                                        && should_log_sample(
+                                            stats.delay_transient_suppressed_corrections,
+                                        )
+                                    {
+                                        log::trace!(
+                                            "Sync correction suppressed while output delay settles: callback={}, suppressed={}, error={:.3}ms, raw_error={:.3}ms, playback_delta={:.1}ms, generation={}",
+                                            stats.callbacks,
+                                            stats.delay_transient_suppressed_corrections,
+                                            error_us as f64 / 1000.0,
+                                            raw_error_us as f64 / 1000.0,
+                                            us_to_ms(playback_delta_us),
+                                            generation,
+                                        );
+                                    }
+                                }
+                                CorrectionSchedule::default()
+                            } else if sync_settled || planned_schedule.reanchor {
                                 planned_schedule
                             } else {
                                 if planned_schedule.is_correcting() {
