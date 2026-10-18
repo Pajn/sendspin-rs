@@ -34,6 +34,11 @@ pub use protocol::manager::{ConnectionManager, ManagedConnection, ManagerConfig}
 pub use protocol::messages::ServerHello;
 pub use sync::raw_clock::{Clock, DefaultClock};
 
+/// The WebSocket implementation the client is built on, re-exported so that
+/// streams passed to [`ProtocolClientBuilder::accept`] come from the same version.
+#[cfg(feature = "client")]
+pub use tokio_tungstenite;
+
 /// Result type for sendspin operations
 pub type Result<T> = std::result::Result<T, error::Error>;
 

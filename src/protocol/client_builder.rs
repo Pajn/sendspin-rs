@@ -234,6 +234,11 @@ impl ProtocolClientBuilder {
     /// otherwise need to own the WebSocket layer yourself. For the common
     /// "bind a TCP socket and accept inbound peers" case, use
     /// [`Self::listen`].
+    ///
+    /// It also serves outbound connections that must exchange messages before
+    /// the Sendspin handshake, such as a proxy that expects an authentication
+    /// frame first: open the stream with [`tokio_tungstenite::connect_async`],
+    /// complete the exchange, then pass the stream here.
     pub async fn accept<S>(self, ws_stream: WebSocketStream<S>) -> Result<ProtocolClient, Error>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
