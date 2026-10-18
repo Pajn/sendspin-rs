@@ -1478,3 +1478,73 @@ async fn test_concurrent_send_during_disconnect_is_clean() {
     // that join! returned at all — neither future deadlocked.
     let _ = send_res;
 }
+
+/// A proxy in front of the server can require an exchange before
+/// `client/hello`. The caller opens the stream, completes that exchange, and
+/// hands the stream to `accept`, which carries on with the Sendspin handshake.
+#[tokio::test]
+async fn test_accept_drives_an_outbound_stream_after_a_pre_handshake_exchange() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+
+        let WsMessage::Text(auth) = ws.next().await.unwrap().unwrap() else {
+            panic!("expected the auth frame first");
+        };
+        assert_eq!(auth.as_str(), r#"{"type":"auth","token":"secret"}"#);
+        ws.send(WsMessage::Text(r#"{"type":"auth_ok"}"#.into()))
+            .await
+            .unwrap();
+
+        let WsMessage::Text(hello) = ws.next().await.unwrap().unwrap() else {
+            panic!("expected client/hello after auth");
+        };
+        let Message::ClientHello(hello) = serde_json::from_str::<Message>(&hello).unwrap() else {
+            panic!("expected client/hello after auth");
+        };
+        let server_hello = Message::ServerHello(sendspin::protocol::messages::ServerHello {
+            server_id: "proxied-server".to_string(),
+            name: "Proxied Server".to_string(),
+            version: 1,
+            active_roles: hello.supported_roles,
+            connection_reason: ConnectionReason::Playback,
+        });
+        ws.send(text_message(&server_hello)).await.unwrap();
+
+        let WsMessage::Text(state) = ws.next().await.unwrap().unwrap() else {
+            panic!("expected client/state after the handshake");
+        };
+        serde_json::from_str::<Message>(&state).unwrap()
+    });
+
+    let (mut ws, _) = sendspin::tokio_tungstenite::connect_async(&url)
+        .await
+        .unwrap();
+    ws.send(WsMessage::Text(
+        r#"{"type":"auth","token":"secret"}"#.into(),
+    ))
+    .await
+    .unwrap();
+    let WsMessage::Text(reply) = ws.next().await.unwrap().unwrap() else {
+        panic!("expected auth_ok");
+    };
+    assert_eq!(reply.as_str(), r#"{"type":"auth_ok"}"#);
+
+    let client = ProtocolClientBuilder::builder()
+        .client_id("proxied-client".to_string())
+        .name("Proxied".to_string())
+        .build()
+        .accept(ws)
+        .await
+        .unwrap();
+
+    assert_eq!(client.server_hello().server_id, "proxied-server");
+    let state = tokio::time::timeout(std::time::Duration::from_secs(2), server)
+        .await
+        .expect("timed out waiting for client/state")
+        .unwrap();
+    assert!(matches!(state, Message::ClientState(_)));
+}
