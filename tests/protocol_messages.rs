@@ -1340,3 +1340,23 @@ fn test_artwork_format_request_from_wire_json() {
     assert_eq!(parsed.media_width, Some(400));
     assert_eq!(parsed.media_height, Some(400));
 }
+
+#[test]
+fn test_client_state_reads_output_delay_ms_as_static_delay() {
+    // Spec 1.0.0-rc1 renamed `static_delay_ms` to `output_delay_ms`.
+    let json = r#"{"type":"client/state","payload":{"player":{"output_delay_ms":40}}}"#;
+
+    let Message::ClientState(state) = serde_json::from_str(json).unwrap() else {
+        panic!("Expected ClientState");
+    };
+    let player = state.player.expect("Expected player state");
+    assert_eq!(player.static_delay_ms, Some(40));
+
+    let json = serde_json::to_string(&Message::ClientState(ClientState {
+        state: None,
+        player: Some(player),
+    }))
+    .unwrap();
+    assert!(json.contains("\"static_delay_ms\":40"));
+    assert!(!json.contains("output_delay_ms"));
+}

@@ -333,8 +333,14 @@ pub struct PlayerState {
     /// Whether audio is muted
     #[serde(skip_serializing_if = "Option::is_none")]
     pub muted: Option<bool>,
-    /// Static delay in milliseconds (0-5000) to compensate for external speaker/amplifier latency
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    /// Static delay in milliseconds (0-5000) to compensate for external speaker/amplifier latency.
+    ///
+    /// Also read from `output_delay_ms`, the field's name from spec 1.0.0-rc1.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        alias = "output_delay_ms"
+    )]
     pub static_delay_ms: Option<u16>,
     /// Minimum startup lead time in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none", default)]
