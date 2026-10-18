@@ -1,3 +1,5 @@
+#![cfg(feature = "client")]
+
 use sendspin::protocol::client_builder::ProtocolClientBuilder;
 use sendspin::protocol::messages::{
     ArtworkChannel, ArtworkSource, ArtworkV1Support, AudioFormatSpec, ImageFormat, PlayerV1Support,

@@ -1,6 +1,8 @@
 // ABOUTME: FLAC decoder conformance tests against the reference implementation
 // ABOUTME: Tripwire for regressions in the pinned flac-codec dependency
 
+#![cfg(feature = "player")]
+
 //! Conformance tests for [`FlacDecoder`].
 //!
 //! Fixtures in `tests/data/` are produced by `gen_fixtures.sh`: audio is

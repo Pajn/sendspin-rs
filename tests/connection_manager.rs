@@ -1,6 +1,8 @@
 // ABOUTME: Integration tests for ConnectionManager — concurrent inbound
 // ABOUTME: handshakes, multi-server arbitration, and automatic goodbyes.
 
+#![cfg(feature = "client")]
+
 use futures_util::{SinkExt, StreamExt};
 use sendspin::protocol::manager::{ConnectionManager, ManagerConfig};
 use sendspin::protocol::messages::{ConnectionReason, GoodbyeReason, Message, ServerHello};

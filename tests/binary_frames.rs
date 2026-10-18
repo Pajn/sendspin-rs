@@ -1,6 +1,8 @@
 // ABOUTME: Tests for binary frame parsing (audio, artwork, visualizer)
 // ABOUTME: Validates Sendspin protocol binary message types and edge cases
 
+#![cfg(feature = "client")]
+
 use sendspin::protocol::client::{
     binary_types, ArtworkChunk, AudioChunk, BinaryFrame, VisualizerChunk,
 };

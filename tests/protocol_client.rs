@@ -1,3 +1,5 @@
+#![cfg(feature = "client")]
+
 use futures_util::{SinkExt, StreamExt};
 use sendspin::error::Error;
 use sendspin::protocol::messages::{

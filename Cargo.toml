@@ -8,8 +8,29 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/Sendspin/sendspin-rs"
 
 [features]
-default = []
+default = ["client", "player"]
+# The WebSocket client, its builder, the inbound listener and the connection
+# manager. Without it the crate is the message types and clock synchronization,
+# which is what a server implementation needs.
+client = [
+    "dep:tokio",
+    "dep:tokio-tungstenite",
+    "dep:futures-util",
+    "dep:serde_json",
+    "dep:uuid",
+    "dep:typed-builder",
+    "dep:parking_lot",
+]
+# Decoders and synchronized audio output through cpal.
+player = [
+    "dep:cpal",
+    "dep:flac-codec",
+    "dep:opus-rs",
+    "dep:crossbeam",
+    "dep:parking_lot",
+]
 native-tls = [
+    "client",
     "tokio-tungstenite/native-tls",
     "dep:tokio-native-tls",
     "dep:native-tls",
@@ -17,36 +38,36 @@ native-tls = [
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.52", features = ["full"] }
-tokio-tungstenite = "0.29"
+tokio = { version = "1.52", features = ["full"], optional = true }
+tokio-tungstenite = { version = "0.29", optional = true }
 tokio-native-tls = { version = "0.3", optional = true }
 native-tls = { version = "0.2", optional = true }
-futures-util = "0.3"
+futures-util = { version = "0.3", optional = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", optional = true }
 
 # Error handling
 thiserror = "2.0"
 
 # Utilities
 log = "0.4"
-uuid = { version = "1.23", features = ["v4", "serde"] }
+uuid = { version = "1.23", features = ["v4", "serde"], optional = true }
 
 # Audio output
-cpal = "0.18"
+cpal = { version = "0.18", optional = true }
 
 # Audio codecs
-flac-codec = "=1.3.2"
-opus-rs = "=0.1.23"
+flac-codec = { version = "=1.3.2", optional = true }
+opus-rs = { version = "=0.1.23", optional = true }
 
 # Concurrency
-crossbeam = "0.8"
+crossbeam = { version = "0.8", optional = true }
 
 # Fast mutexes
-parking_lot = "0.12"
-typed-builder = "0.23.2"
+parking_lot = { version = "0.12", optional = true }
+typed-builder = { version = "0.23.2", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
@@ -60,9 +81,10 @@ libc = "0.2"
 # real-time (and cpal has no macOS audio_thread_priority dependency, so the
 # feature would be inert), while Linux promotion needs the dbus/RtKit variant
 # (realtime-dbus) plus a system libdbus build dependency.
-cpal = { version = "0.18", features = ["realtime"] }
+cpal = { version = "0.18", features = ["realtime"], optional = true }
 
 [dev-dependencies]
+serde_json = "1.0"
 tokio-test = "0.4"
 base64 = "0.22"
 env_logger = "0.11"
@@ -74,6 +96,29 @@ opt-level = 3
 lto = true
 codegen-units = 1
 
+[package.metadata.docs.rs]
+all-features = true
+
+[[example]]
+name = "basic_client"
+required-features = ["client"]
+
+[[example]]
+name = "controller_only"
+required-features = ["client"]
+
+[[example]]
+name = "minimal_test"
+required-features = ["client"]
+
+[[example]]
+name = "player"
+required-features = ["client", "player"]
+
 [[example]]
 name = "secure_socket"
 required-features = ["native-tls"]
+
+[[example]]
+name = "server_initiated_metadata"
+required-features = ["client"]

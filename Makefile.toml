@@ -4,7 +4,14 @@ CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
 [tasks.verify]
 description = "Run verification tasks"
 workspace = false
-dependencies = ["run-tests", "lint", "docs", "verify-doc-tests", "verify-formatting"]
+dependencies = [
+    "run-tests",
+    "lint",
+    "lint-features",
+    "docs",
+    "verify-doc-tests",
+    "verify-formatting",
+]
 
 [tasks.run-tests]
 description = "Run workspace tests"
@@ -30,6 +37,15 @@ args = [
     "-D",
     "warnings",
 ]
+
+[tasks.lint-features]
+description = "Run Clippy on each feature set on its own"
+workspace = false
+script = '''
+cargo clippy --all-targets --no-default-features -- -D warnings
+cargo clippy --all-targets --no-default-features --features client -- -D warnings
+cargo clippy --all-targets --no-default-features --features player -- -D warnings
+'''
 
 [tasks.docs]
 description = "Generate documentation with warnings treated as errors"

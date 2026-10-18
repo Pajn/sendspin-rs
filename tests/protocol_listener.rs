@@ -1,6 +1,8 @@
 // ABOUTME: Integration tests for ProtocolListener — inbound (server-initiated)
 // ABOUTME: WebSocket acceptor that drives the protocol-client state machine.
 
+#![cfg(feature = "client")]
+
 use futures_util::{SinkExt, StreamExt};
 use sendspin::protocol::messages::{
     ClientCommand, ClientSyncState, ConnectionReason, GoodbyeReason, Message, PlayerState,

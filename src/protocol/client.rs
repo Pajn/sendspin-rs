@@ -239,7 +239,7 @@ impl WsSender {
     /// Include player state when volume, mute, or static delay may have changed
     /// while the external source owned the device. Hardware/OS mixer changes
     /// must be read through platform APIs; this library only tracks its own
-    /// software [`GainControl`](crate::audio::GainControl).
+    /// software `GainControl` (with the `player` feature).
     pub async fn exit_external_source(&self, player: Option<PlayerState>) -> Result<(), Error> {
         self.send_message(Message::ClientState(ClientState {
             state: Some(ClientSyncState::Synchronized),

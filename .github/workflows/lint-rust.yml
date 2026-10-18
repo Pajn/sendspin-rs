@@ -47,3 +47,33 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  features:
+    name: clippy (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # No ALSA headers: these builds must not reach cpal.
+          - features: none
+            args: --no-default-features
+          - features: client
+            args: --no-default-features --features client
+          - features: player
+            args: --no-default-features --features player
+            alsa: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+      - name: Install ALSA dev headers
+        if: matrix.alsa
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Run clippy
+        run: cargo clippy --all-targets ${{ matrix.args }} -- -D warnings

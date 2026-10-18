@@ -1,3 +1,5 @@
+#![cfg(feature = "player")]
+
 use cpal::Sample;
 use sendspin::audio::decode::{Decoder, PcmDecoder};
 

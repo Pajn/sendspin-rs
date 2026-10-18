@@ -35,7 +35,26 @@ Hyper-efficient Rust implementation of the [Sendspin Protocol](https://github.co
 - End-to-end player
 
 
+## Cargo features
+
+| Feature | Default | What it adds |
+|---|---|---|
+| `client` | yes | The WebSocket client, its builder, the inbound listener and the connection manager (Tokio, tungstenite) |
+| `player` | yes | PCM, FLAC and Opus decoders and synchronized output through cpal |
+| `native-tls` | no | TLS for the listener and `wss://` connections; implies `client` |
+
+With `default-features = false` the crate is the protocol message types and clock
+synchronization, with no async runtime or audio dependencies. That is what a server
+implementation needs:
+
+```toml
+[dependencies]
+sendspin = { version = "0.3", default-features = false }
+```
+
 ## Installing build dependencies
+
+The `player` feature needs ALSA headers on Linux.
 
 ### Debian/Ubuntu/Mint
 

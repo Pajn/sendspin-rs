@@ -11,18 +11,25 @@
 #![warn(missing_docs)]
 
 /// Audio types and processing
+#[cfg(feature = "player")]
 pub mod audio;
 /// Protocol implementation for WebSocket communication
 pub mod protocol;
 /// Clock synchronization utilities
 pub mod sync;
 
+#[cfg(any(feature = "client", feature = "player"))]
 pub(crate) mod log_sampling;
 
+#[cfg(feature = "player")]
 pub use audio::GainControl;
+#[cfg(feature = "client")]
 pub use protocol::client::{Connection, ConnectionGuard, Controller, ProtocolClient, WsSender};
+#[cfg(feature = "client")]
 pub use protocol::client_builder::ProtocolClientBuilder;
+#[cfg(feature = "client")]
 pub use protocol::listener::ProtocolListener;
+#[cfg(feature = "client")]
 pub use protocol::manager::{ConnectionManager, ManagedConnection, ManagerConfig};
 pub use protocol::messages::ServerHello;
 pub use sync::raw_clock::{Clock, DefaultClock};
