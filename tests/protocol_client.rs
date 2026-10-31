@@ -1211,6 +1211,54 @@ async fn test_message_router_forwards_binary_audio() {
 }
 
 #[tokio::test]
+async fn test_audio_chunks_count_the_player_stream_starts_before_them() {
+    // Audio and messages go to separate channels; the count tells which side of a
+    // `stream/start` a chunk came.
+    let (url, _rx, server_tx, _handle) = start_test_server_with_sender().await;
+    let client = ProtocolClientBuilder::builder()
+        .client_id("test-client".to_string())
+        .name("Test".to_string())
+        .player_v1_support(PlayerV1Support {
+            supported_formats: vec![AudioFormatSpec {
+                codec: "pcm".to_string(),
+                channels: 2,
+                sample_rate: 48000,
+                bit_depth: 24,
+            }],
+            buffer_capacity: 1024,
+            supported_commands: vec![],
+        })
+        .build()
+        .connect(&url)
+        .await
+        .unwrap();
+    let mut conn = client.split();
+
+    let audio =
+        |timestamp: u8| WsMessage::Binary(vec![4, 0, 0, 0, 0, 0, 0, 0, timestamp, 0].into());
+    server_tx.send(player_stream_start()).unwrap();
+    server_tx.send(audio(1)).unwrap();
+    server_tx.send(artwork_stream_start()).unwrap();
+    server_tx.send(audio(2)).unwrap();
+    server_tx.send(player_stream_start()).unwrap();
+    server_tx.send(audio(3)).unwrap();
+
+    let mut counts = Vec::new();
+    for _ in 0..3 {
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(2), conn.audio.recv())
+            .await
+            .expect("timed out waiting for audio chunk")
+            .expect("audio channel closed");
+        counts.push((chunk.timestamp, chunk.stream_starts));
+    }
+    assert_eq!(
+        counts,
+        [(1, 1), (2, 1), (3, 2)],
+        "artwork starts do not count"
+    );
+}
+
+#[tokio::test]
 async fn test_message_router_forwards_binary_artwork() {
     // Mirror of the audio test for the artwork path. Each binary channel has
     // its own closed-flag and send wiring, so each needs separate coverage.

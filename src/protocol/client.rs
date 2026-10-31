@@ -543,6 +543,12 @@ pub struct AudioChunk {
     pub timestamp: i64,
     /// Raw audio data bytes
     pub data: Arc<[u8]>,
+    /// How many `stream/start`s for the player the connection received before this chunk.
+    ///
+    /// Audio and messages arrive on separate channels, so this is how a consumer tells which
+    /// format a chunk is in when a `stream/start` changes it in place: the one set by the
+    /// `stream/start` that brought the count to this.
+    pub stream_starts: u64,
 }
 
 impl AudioChunk {
@@ -570,7 +576,11 @@ impl AudioChunk {
 
         let data = Arc::from(&frame[9..]);
 
-        Ok(Self { timestamp, data })
+        Ok(Self {
+            timestamp,
+            data,
+            stream_starts: 0,
+        })
     }
 }
 
@@ -1032,11 +1042,13 @@ impl ProtocolClient {
         let mut message_closed = false;
         let mut audio_chunk_count = 0u64;
         let mut visualizer_chunk_count = 0u64;
+        let mut player_stream_starts = 0u64;
 
         while let Some(msg) = read.next().await {
             match msg {
                 Ok(WsMessage::Binary(data)) => match BinaryFrame::from_bytes(&data) {
-                    Ok(BinaryFrame::Audio(chunk)) => {
+                    Ok(BinaryFrame::Audio(mut chunk)) => {
+                        chunk.stream_starts = player_stream_starts;
                         audio_chunk_count += 1;
                         if should_log_sample(audio_chunk_count) {
                             log::trace!(
@@ -1121,6 +1133,9 @@ impl ProtocolClient {
                                 // stream/start or stream/end sees current state.
                                 match &msg {
                                     Message::StreamStart(start) => {
+                                        if start.player.is_some() {
+                                            player_stream_starts += 1;
+                                        }
                                         stream_state.note_stream_start(start)
                                     }
                                     Message::StreamEnd(end) => stream_state.note_stream_end(end),
