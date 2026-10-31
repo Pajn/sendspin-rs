@@ -11,6 +11,8 @@ pub mod pool;
 pub mod sync_correction;
 /// Synced playback helper using output timestamps
 pub mod synced_player;
+/// Device-independent core of the synced player
+mod synced_renderer;
 /// Core audio type definitions (Sample, Codec, AudioFormat, AudioBuffer)
 pub mod types;
 
