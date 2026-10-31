@@ -31,6 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             required_lead_time_ms: Some(500),
             min_buffer_ms: Some(500),
             supported_commands: None,
+            format: None,
         })
         .build();
 

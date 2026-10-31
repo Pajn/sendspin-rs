@@ -115,6 +115,7 @@ async fn test_listen_accepts_and_drives_handshake() {
             required_lead_time_ms: Some(500),
             min_buffer_ms: Some(500),
             supported_commands: None,
+            format: None,
         })
         .build();
 

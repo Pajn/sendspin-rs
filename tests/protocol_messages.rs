@@ -90,6 +90,7 @@ fn test_client_state_serialization() {
             required_lead_time_ms: Some(500),
             min_buffer_ms: Some(500),
             supported_commands: None,
+            format: None,
         }),
     };
 
@@ -1266,6 +1267,7 @@ fn test_player_state_supported_commands_roundtrip() {
             required_lead_time_ms: Some(500),
             min_buffer_ms: Some(500),
             supported_commands: Some(vec![PlayerStateCommand::SetStaticDelay]),
+            format: None,
         }),
     };
 
@@ -1283,6 +1285,39 @@ fn test_player_state_supported_commands_roundtrip() {
                 .supported_commands
                 .expect("Expected supported_commands");
             assert_eq!(cmds, vec![PlayerStateCommand::SetStaticDelay]);
+        }
+        _ => panic!("Expected ClientState"),
+    }
+}
+
+/// A preferred format in client/state goes out as the spec's `player.format`, and back.
+#[test]
+fn test_player_state_format_roundtrip() {
+    let state = ClientState {
+        state: None,
+        player: Some(PlayerState {
+            volume: Some(50),
+            format: Some(AudioFormatSpec {
+                codec: "opus".to_string(),
+                channels: 2,
+                sample_rate: 48000,
+                bit_depth: 16,
+            }),
+            ..PlayerState::default()
+        }),
+    };
+
+    let json = serde_json::to_value(Message::ClientState(state)).unwrap();
+    assert_eq!(
+        json["payload"]["player"]["format"],
+        serde_json::json!({"codec": "opus", "channels": 2, "sample_rate": 48000, "bit_depth": 16})
+    );
+
+    let parsed: Message = serde_json::from_value(json).unwrap();
+    match parsed {
+        Message::ClientState(cs) => {
+            let format = cs.player.and_then(|p| p.format).expect("Expected format");
+            assert_eq!((format.codec.as_str(), format.sample_rate), ("opus", 48000));
         }
         _ => panic!("Expected ClientState"),
     }

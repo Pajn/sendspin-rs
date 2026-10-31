@@ -132,7 +132,7 @@ pub struct PlayerV1Support {
 }
 
 /// Audio format specification
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioFormatSpec {
     /// Codec name (e.g., "pcm", "opus", "flac")
     pub codec: String,
@@ -351,6 +351,12 @@ pub struct PlayerState {
     /// Supported player state commands
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub supported_commands: Option<Vec<PlayerStateCommand>>,
+    /// The format the player would rather receive: one of its `supported_formats`.
+    ///
+    /// The server takes it over its own choice from then on; if a stream is active, it may switch
+    /// to it with a new `stream/start` that goes on from where the stream's audio has reached.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub format: Option<AudioFormatSpec>,
 }
 
 /// Commands that can appear in PlayerState.supported_commands

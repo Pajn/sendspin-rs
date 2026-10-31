@@ -220,6 +220,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             required_lead_time_ms: Some(required_lead_time_ms),
             min_buffer_ms: Some(min_buffer_ms),
             supported_commands: Some(vec![PlayerStateCommand::SetStaticDelay]),
+            format: None,
         })
         .build();
 

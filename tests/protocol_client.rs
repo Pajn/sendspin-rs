@@ -193,6 +193,7 @@ async fn test_connect_sends_initial_state() {
             required_lead_time_ms: Some(500),
             min_buffer_ms: Some(500),
             supported_commands: None,
+            format: None,
         })
         .build();
 
@@ -292,6 +293,7 @@ async fn test_connect_initial_external_source_preserves_player_state() {
             required_lead_time_ms: Some(500),
             min_buffer_ms: Some(500),
             supported_commands: None,
+            format: None,
         })
         .build();
 
