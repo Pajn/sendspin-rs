@@ -1548,3 +1548,49 @@ async fn test_accept_drives_an_outbound_stream_after_a_pre_handshake_exchange() 
         .unwrap();
     assert!(matches!(state, Message::ClientState(_)));
 }
+
+/// A client that reconnects can keep time with the clock synchronization it
+/// had: the new connection refines the same estimate rather than a new one.
+#[tokio::test]
+async fn test_a_connection_keeps_time_with_the_clock_sync_it_is_given() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        let WsMessage::Text(hello) = ws.next().await.unwrap().unwrap() else {
+            panic!("expected client/hello");
+        };
+        let Message::ClientHello(hello) = serde_json::from_str::<Message>(&hello).unwrap() else {
+            panic!("expected client/hello");
+        };
+        let server_hello = Message::ServerHello(sendspin::protocol::messages::ServerHello {
+            server_id: "server".to_string(),
+            name: "Server".to_string(),
+            version: 1,
+            active_roles: hello.supported_roles,
+            connection_reason: ConnectionReason::Playback,
+        });
+        ws.send(text_message(&server_hello)).await.unwrap();
+        // Hold the connection open for the test.
+        while ws.next().await.is_some() {}
+    });
+
+    use parking_lot::Mutex;
+    use sendspin::sync::ClockSync;
+    use sendspin::DefaultClock;
+    use std::sync::Arc;
+
+    let clock_sync = Arc::new(Mutex::new(ClockSync::new(Arc::new(DefaultClock::new()))));
+    let client = ProtocolClientBuilder::builder()
+        .client_id("client".to_string())
+        .name("Client".to_string())
+        .build()
+        .clock_sync(Arc::clone(&clock_sync))
+        .connect(url.as_str())
+        .await
+        .unwrap();
+
+    assert!(Arc::ptr_eq(&client.clock_sync(), &clock_sync));
+}

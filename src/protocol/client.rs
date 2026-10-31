@@ -831,6 +831,7 @@ impl ProtocolClient {
         hello: ClientHello,
         initial_state: ClientState,
         clock: Arc<dyn Clock>,
+        clock_sync: Option<Arc<Mutex<ClockSync>>>,
     ) -> Result<Self, Error>
     where
         R: IntoClientRequest + Unpin,
@@ -839,7 +840,7 @@ impl ProtocolClient {
             .await
             .map_err(|e| Error::Connection(e.to_string()))?;
 
-        Self::drive(ws_stream, hello, initial_state, clock).await
+        Self::drive(ws_stream, hello, initial_state, clock, clock_sync).await
     }
 
     /// Drive the protocol-client state machine over an already-handshaked
@@ -850,6 +851,7 @@ impl ProtocolClient {
         hello: ClientHello,
         initial_state: ClientState,
         clock: Arc<dyn Clock>,
+        clock_sync: Option<Arc<Mutex<ClockSync>>>,
     ) -> Result<Self, Error>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -934,7 +936,8 @@ impl ProtocolClient {
         let (artwork_tx, artwork_rx) = unbounded_channel();
         let (visualizer_tx, visualizer_rx) = unbounded_channel();
         let (message_tx, message_rx) = unbounded_channel();
-        let clock_sync = Arc::new(Mutex::new(ClockSync::new(Arc::clone(&clock))));
+        let clock_sync =
+            clock_sync.unwrap_or_else(|| Arc::new(Mutex::new(ClockSync::new(Arc::clone(&clock)))));
         let stream_state = Arc::new(StreamState::default());
 
         let writer_handle = tokio::spawn(writer_task(write, out_rx));

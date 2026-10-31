@@ -7,7 +7,9 @@ use crate::protocol::messages::{
     PlayerState, PlayerV1Support, VisualizerV1Support,
 };
 use crate::sync::raw_clock::{Clock, DefaultClock};
+use crate::sync::ClockSync;
 use crate::ProtocolClient;
+use parking_lot::Mutex;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, ToSocketAddrs};
@@ -104,6 +106,7 @@ impl From<ProtocolClientBuilderRaw> for ProtocolClientBuilder {
             supported_roles,
             player_v1_support,
             clock: Arc::new(DefaultClock::new()),
+            clock_sync: None,
             artwork_v1_support: raw.artwork_v1_support,
             visualizer_v1_support: raw.visualizer_v1_support,
             initial_sync_state: raw.initial_sync_state,
@@ -184,6 +187,7 @@ pub struct ProtocolClientBuilder {
     initial_sync_state: ClientSyncState,
     initial_player_state: Option<PlayerState>,
     clock: Arc<dyn Clock>,
+    clock_sync: Option<Arc<Mutex<ClockSync>>>,
 }
 
 impl ProtocolClientBuilder {
@@ -213,6 +217,23 @@ impl ProtocolClientBuilder {
         self
     }
 
+    /// Keep time with an existing clock synchronization rather than a new one.
+    ///
+    /// For a client that reconnects to the same server: the connection keeps
+    /// refining the estimate it was given, so it is in step from the start,
+    /// and output already scheduled on that estimate stays in step across the
+    /// reconnect. Its clock replaces the builder's. Should the server's clock
+    /// have moved, the filter's adaptive forgetting takes in the new offset
+    /// within a few samples.
+    ///
+    /// Do not share one between connections to different servers, or between
+    /// peers of a listener.
+    pub fn clock_sync(mut self, clock_sync: Arc<Mutex<ClockSync>>) -> Self {
+        self.clock = clock_sync.lock().clock();
+        self.clock_sync = Some(clock_sync);
+        self
+    }
+
     /// Connect to Sendspin server.
     ///
     /// Accepts anything that implements [`IntoClientRequest`], such as a URL string
@@ -223,8 +244,8 @@ impl ProtocolClientBuilder {
         self,
         request: R,
     ) -> Result<ProtocolClient, Error> {
-        let (hello, initial_state, clock) = self.into_parts();
-        ProtocolClient::connect(request, hello, initial_state, clock).await
+        let (hello, initial_state, clock, clock_sync) = self.into_parts();
+        ProtocolClient::connect(request, hello, initial_state, clock, clock_sync).await
     }
 
     /// Adopt an already-handshaked WebSocket stream and drive the protocol
@@ -243,8 +264,8 @@ impl ProtocolClientBuilder {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let (hello, initial_state, clock) = self.into_parts();
-        ProtocolClient::drive(ws_stream, hello, initial_state, clock).await
+        let (hello, initial_state, clock, clock_sync) = self.into_parts();
+        ProtocolClient::drive(ws_stream, hello, initial_state, clock, clock_sync).await
     }
 
     /// Bind a TCP listener and produce a [`ProtocolListener`] that accepts
@@ -261,7 +282,15 @@ impl ProtocolClientBuilder {
         Ok(ProtocolListener::new(tcp, self))
     }
 
-    fn into_parts(self) -> (ClientHello, ClientState, Arc<dyn Clock>) {
+    #[allow(clippy::type_complexity)]
+    fn into_parts(
+        self,
+    ) -> (
+        ClientHello,
+        ClientState,
+        Arc<dyn Clock>,
+        Option<Arc<Mutex<ClockSync>>>,
+    ) {
         let hello = ClientHello {
             client_id: self.client_id,
             name: self.name,
@@ -283,6 +312,6 @@ impl ProtocolClientBuilder {
             player: self.initial_player_state,
         };
 
-        (hello, initial_state, self.clock)
+        (hello, initial_state, self.clock, self.clock_sync)
     }
 }
