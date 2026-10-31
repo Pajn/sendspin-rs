@@ -56,6 +56,18 @@ impl CorrectionPlanner {
         }
     }
 
+    /// A planner with both limits set: speed corrections capped at
+    /// `max_speed_correction` (a fraction of real time) and a re-anchor
+    /// for errors of `reanchor_threshold_us` or more, instead of the
+    /// defaults. The engage and deadband thresholds are unchanged.
+    pub fn with_limits(max_speed_correction: f64, reanchor_threshold_us: i64) -> Self {
+        Self {
+            max_speed_correction,
+            reanchor_threshold_us,
+            ..Self::new()
+        }
+    }
+
     /// Plan a correction schedule from sync error and sample rate.
     ///
     /// `error_us` is the sync error in microseconds (positive = ahead, negative = behind).
@@ -960,5 +972,35 @@ mod tests {
         assert!(!capped.plan(2_500, 48_000, false).is_correcting());
         assert!(capped.plan(3_500, 48_000, false).is_correcting());
         assert!(capped.plan(500_000, 48_000, false).reanchor);
+    }
+
+    #[test]
+    fn test_limited_planner_reanchors_at_its_threshold() {
+        let planner = CorrectionPlanner::with_limits(0.005, 20_000);
+        assert!(planner.plan(20_000, 48_000, false).reanchor);
+        assert!(planner.plan(-20_000, 48_000, false).reanchor);
+        let below = planner.plan(19_999, 48_000, false);
+        assert!(!below.reanchor, "below the threshold corrects by speed");
+        assert!(below.drop_every_n_frames > 0);
+        // The default planner would correct 20ms by speed.
+        assert!(
+            !CorrectionPlanner::new()
+                .plan(20_000, 48_000, false)
+                .reanchor
+        );
+    }
+
+    #[test]
+    fn test_limited_planner_caps_speed_and_keeps_thresholds() {
+        let planner = CorrectionPlanner::with_limits(0.005, 20_000);
+        // 19ms wants 456 corrections/s; 0.5% of 48kHz allows 240.
+        assert_eq!(planner.plan(19_000, 48_000, false).drop_every_n_frames, 200);
+        assert_eq!(
+            planner.plan(-19_000, 48_000, false).insert_every_n_frames,
+            200
+        );
+        assert!(!planner.plan(2_500, 48_000, false).is_correcting());
+        assert!(planner.plan(2_000, 48_000, true).is_correcting());
+        assert!(!planner.plan(1_500, 48_000, true).is_correcting());
     }
 }

@@ -297,6 +297,14 @@ const STARTUP_GENTLE_WINDOW: Duration = Duration::from_secs(20);
 /// Speed-correction cap during [`STARTUP_GENTLE_WINDOW`]: 0.5%, under 9 cents.
 const STARTUP_MAX_SPEED_CORRECTION: f64 = 0.005;
 
+/// Errors at or above this are re-anchored in [`CorrectionMode::Smooth`]:
+/// 20ms. Slewing more than that at the smooth speed cap would take seconds.
+const SMOOTH_REANCHOR_THRESHOLD_US: i64 = 20_000;
+
+/// Speed-correction cap in [`CorrectionMode::Smooth`], during and after
+/// startup: 0.5%, under 9 cents.
+const SMOOTH_MAX_SPEED_CORRECTION: f64 = 0.005;
+
 /// Observe delay before planning each callback; call `start` when audio begins.
 /// Observations may precede playback, but startup deadlines begin at `start`.
 struct StartupCorrectionState {
@@ -321,12 +329,23 @@ struct CorrectionDecision {
 }
 
 impl StartupCorrectionState {
-    fn new() -> Self {
-        Self {
-            planner: CorrectionPlanner::new(),
-            startup_planner: CorrectionPlanner::with_max_speed_correction(
-                STARTUP_MAX_SPEED_CORRECTION,
+    fn new(mode: CorrectionMode) -> Self {
+        let (planner, startup_planner) = match mode {
+            CorrectionMode::DropInsert => (
+                CorrectionPlanner::new(),
+                CorrectionPlanner::with_max_speed_correction(STARTUP_MAX_SPEED_CORRECTION),
             ),
+            CorrectionMode::Smooth => {
+                let planner = CorrectionPlanner::with_limits(
+                    SMOOTH_MAX_SPEED_CORRECTION,
+                    SMOOTH_REANCHOR_THRESHOLD_US,
+                );
+                (planner, planner)
+            }
+        };
+        Self {
+            planner,
+            startup_planner,
             error_filter: SyncErrorFilter::new(),
             engage_gate: EngageGate::new(),
             delay_settle: OutputDelaySettle::new(),
@@ -335,8 +354,13 @@ impl StartupCorrectionState {
         }
     }
 
+    /// Forget all state except the planners.
     fn reset(&mut self) {
-        *self = Self::new();
+        *self = Self {
+            planner: self.planner,
+            startup_planner: self.startup_planner,
+            ..Self::new(CorrectionMode::default())
+        };
     }
 
     fn reset_measurements(&mut self) {
@@ -423,7 +447,7 @@ mod startup_correction_tests {
     #[test]
     fn cold_start_overshoot_plateau_relaxes_without_correction() {
         let start = Instant::now();
-        let mut state = StartupCorrectionState::new();
+        let mut state = StartupCorrectionState::new(CorrectionMode::DropInsert);
         state.start(start);
         let mut schedule = CorrectionSchedule::default();
         let mut settled = false;
@@ -460,7 +484,7 @@ mod startup_correction_tests {
     fn settling_discards_negative_transient_and_requires_fresh_evidence() {
         for real_error in [0, 40_000, -40_000] {
             let start = Instant::now();
-            let mut state = StartupCorrectionState::new();
+            let mut state = StartupCorrectionState::new(CorrectionMode::DropInsert);
             state.start(start);
             let mut schedule = CorrectionSchedule::default();
             for ms in (0..2500).step_by(10) {
@@ -518,7 +542,7 @@ mod startup_correction_tests {
     fn suppression_and_speed_cap_expire_at_exact_deadlines_or_late_callbacks() {
         for late_ms in [0, 137] {
             let start = Instant::now();
-            let mut state = StartupCorrectionState::new();
+            let mut state = StartupCorrectionState::new(CorrectionMode::DropInsert);
             state.start(start);
             let mut schedule = CorrectionSchedule::default();
             for ms in (0..10_000).step_by(10) {
@@ -586,9 +610,34 @@ mod startup_correction_tests {
     }
 
     #[test]
+    fn smooth_mode_reanchors_at_20ms_and_caps_speed_before_and_after_startup() {
+        for after_startup in [false, true] {
+            let ungated = |error_us| {
+                let start = Instant::now();
+                let mut state = StartupCorrectionState::new(CorrectionMode::Smooth);
+                // A reset keeps the mode's planners.
+                state.reset();
+                state.start(start);
+                let age = if after_startup {
+                    STARTUP_GENTLE_WINDOW + Duration::from_secs(1)
+                } else {
+                    Duration::from_secs(1)
+                };
+                state
+                    .plan(start + age, error_us, 48_000, true, true)
+                    .ungated
+            };
+            assert!(ungated(20_000).reanchor);
+            assert!(ungated(-20_000).reanchor);
+            assert_eq!(ungated(19_000).drop_every_n_frames, 200, "0.5% cap");
+            assert_eq!(ungated(-19_000).insert_every_n_frames, 200, "0.5% cap");
+        }
+    }
+
+    #[test]
     fn generation_reset_restarts_floor_filter_gate_and_deadlines() {
         let start = Instant::now();
-        let mut state = StartupCorrectionState::new();
+        let mut state = StartupCorrectionState::new(CorrectionMode::DropInsert);
         state.start(start);
         let mut schedule = CorrectionSchedule::default();
         for ms in (0..=4000).step_by(10) {
@@ -642,7 +691,7 @@ mod startup_correction_tests {
     #[test]
     fn measurement_reset_preserves_startup_timing_and_delay_floor() {
         let start = Instant::now();
-        let mut state = StartupCorrectionState::new();
+        let mut state = StartupCorrectionState::new(CorrectionMode::DropInsert);
         state.start(start);
         let mut schedule = CorrectionSchedule::default();
         for ms in (0..=4000).step_by(10) {
@@ -685,7 +734,7 @@ mod startup_correction_tests {
     #[test]
     fn settled_edges_replace_upward_floor_and_reset_measurements_only_once() {
         let start = Instant::now();
-        let mut state = StartupCorrectionState::new();
+        let mut state = StartupCorrectionState::new(CorrectionMode::DropInsert);
         state.start(start);
         assert_eq!(state.observe_output_delay(start, 5_000), None);
         let mut transitions = Vec::new();
@@ -737,7 +786,7 @@ mod startup_correction_tests {
     #[test]
     fn pre_start_observations_settle_delay_but_deadlines_use_actual_start() {
         let observed_at = Instant::now();
-        let mut state = StartupCorrectionState::new();
+        let mut state = StartupCorrectionState::new(CorrectionMode::DropInsert);
         for ms in (0..=3000).step_by(10) {
             state.observe_output_delay(observed_at + Duration::from_millis(ms), 50_000);
         }
@@ -784,7 +833,7 @@ mod startup_correction_tests {
     #[test]
     fn clock_readiness_cannot_bypass_output_settling_but_allows_gross_reanchor() {
         let start = Instant::now();
-        let mut state = StartupCorrectionState::new();
+        let mut state = StartupCorrectionState::new(CorrectionMode::DropInsert);
         state.start(start);
         let initial = state.plan(start, 600_000, 48_000, false, true);
         assert!(initial.gated.reanchor);
@@ -899,6 +948,25 @@ impl CallbackStats {
     }
 }
 
+/// How a [`SyncedRenderer`] corrects drift between playback and the server
+/// clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CorrectionMode {
+    /// Drop or repeat single frames at a cadence for errors under 500ms, at
+    /// up to 4% of real time (0.5% for the first 20 seconds of playback),
+    /// and jump the playback position for larger ones. Each dropped or
+    /// repeated frame is a small discontinuity, which at high cadences can
+    /// be heard as clicks or garbled audio.
+    #[default]
+    DropInsert,
+    /// Jump the playback position for errors of 20ms or more, and correct
+    /// smaller ones by reading the queue at a slightly different rate with
+    /// linear interpolation, at up to 0.5% of real time. Large errors are
+    /// heard as a brief silence or skip rather than a long stretch of
+    /// altered audio; small ones as a pitch shift under 9 cents.
+    Smooth,
+}
+
 /// Configuration for [`SyncedRenderer`] construction.
 #[derive(Debug, Clone)]
 pub struct SyncedRendererConfig {
@@ -906,6 +974,8 @@ pub struct SyncedRendererConfig {
     pub volume: u8,
     /// Initial mute state.
     pub muted: bool,
+    /// How drift is corrected. Defaults to [`CorrectionMode::DropInsert`].
+    pub correction: CorrectionMode,
 }
 
 impl SyncedRendererConfig {
@@ -914,6 +984,7 @@ impl SyncedRendererConfig {
         Self {
             volume: 100,
             muted: false,
+            correction: CorrectionMode::default(),
         }
     }
 }
@@ -1115,6 +1186,140 @@ impl OutputStage {
     }
 }
 
+/// Input frames consumed per output frame under `schedule`: dropping one
+/// frame in N reads N+1 frames per N output, inserting one reads N-1.
+fn read_step(schedule: &CorrectionSchedule) -> f64 {
+    if schedule.drop_every_n_frames > 0 {
+        1.0 + 1.0 / f64::from(schedule.drop_every_n_frames)
+    } else if schedule.insert_every_n_frames > 0 {
+        1.0 - 1.0 / f64::from(schedule.insert_every_n_frames)
+    } else {
+        1.0
+    }
+}
+
+/// Reads the queue at a fractional rate for [`CorrectionMode::Smooth`],
+/// interpolating linearly between consecutive input frames.
+///
+/// The frame before the read position is the renderer's `last_frame`: the
+/// last frame taken from the queue, or the one before the lookahead frame
+/// held here. Every input frame goes through [`PlaybackQueue::next_frame`],
+/// so the cursor advances exactly one frame per input frame, as it does when
+/// reading frame by frame; while interpolating it runs up to one frame ahead
+/// for the lookahead.
+struct FractionalReader {
+    /// The input frame after `last_frame`, valid while `has_next`.
+    next: Vec<i32>,
+    has_next: bool,
+    /// Read position past `last_frame`, in input frames, in `0.0..1.0`.
+    phase: f64,
+    /// The step of the last correction, kept to finish it on.
+    step: f64,
+}
+
+impl FractionalReader {
+    fn new(channels: usize) -> Self {
+        Self {
+            next: vec![i32::EQUILIBRIUM; channels],
+            has_next: false,
+            phase: 0.0,
+            step: 1.0,
+        }
+    }
+
+    /// Drop the lookahead frame and the fractional position, e.g. after the
+    /// cursor jumped.
+    fn reset(&mut self) {
+        self.has_next = false;
+        self.phase = 0.0;
+        self.step = 1.0;
+    }
+
+    /// Write one output frame to `out`, advancing the read position by
+    /// `step` input frames. Returns false on an underrun, with `out` silent.
+    fn read_frame(
+        &mut self,
+        step: f64,
+        last_frame: &mut [i32],
+        queue: &mut PlaybackQueue,
+        channels: usize,
+        sample_rate: u32,
+        out: &mut [f32],
+    ) -> bool {
+        // When the correction ends between two input frames, it is finished
+        // at its own step until the position next lands within one step's
+        // excess (`|step - 1|`) of a whole frame, and snapped back to that
+        // frame there. A correction moves the position by that excess each
+        // frame, so this takes at most `1 / |step - 1|` frames, and the snap
+        // is smaller than the correction's own per-frame change. Snapping
+        // straight away could instead repeat or skip up to a whole frame.
+        let finishing = step == 1.0 && self.phase > 0.0;
+        let step = if finishing { self.step } else { step };
+
+        if step == 1.0 {
+            // Not correcting, on a whole frame: read frame by frame, the
+            // held lookahead frame first.
+            if self.has_next {
+                self.has_next = false;
+                last_frame.copy_from_slice(&self.next);
+            } else if let Some(frame) = queue.next_frame(channels, sample_rate) {
+                last_frame.copy_from_slice(frame);
+            } else {
+                out.fill(0.0);
+                return false;
+            }
+            for (out, sample) in out.iter_mut().zip(last_frame.iter()) {
+                *out = f32::from_sample(*sample);
+            }
+            return true;
+        }
+
+        if !finishing {
+            self.step = step;
+        }
+        self.phase += step;
+        while self.phase >= 1.0 {
+            if self.has_next {
+                self.has_next = false;
+                last_frame.copy_from_slice(&self.next);
+            } else if let Some(frame) = queue.next_frame(channels, sample_rate) {
+                last_frame.copy_from_slice(frame);
+            } else {
+                // Resume from the last frame read once audio returns.
+                self.phase = 0.0;
+                out.fill(0.0);
+                return false;
+            }
+            self.phase -= 1.0;
+        }
+        if finishing && self.phase < (step - 1.0).abs() {
+            self.phase = 0.0;
+        }
+        if self.phase > 0.0 && !self.has_next {
+            if let Some(frame) = queue.next_frame(channels, sample_rate) {
+                self.next.copy_from_slice(frame);
+                self.has_next = true;
+            } else {
+                self.phase = 0.0;
+                out.fill(0.0);
+                return false;
+            }
+        }
+        if self.has_next {
+            for ((out, from), to) in out.iter_mut().zip(last_frame.iter()).zip(&self.next) {
+                let from = f64::from_sample(*from);
+                let to = f64::from_sample(*to);
+                *out = (from + (to - from) * self.phase) as f32;
+            }
+        } else {
+            for (out, sample) in out.iter_mut().zip(last_frame.iter()) {
+                *out = f32::from_sample(*sample);
+            }
+        }
+        true
+    }
+}
+
 /// Synchronized playback for an output the caller drives.
 ///
 /// `SyncedPlayer` (the `player` feature) opens a cpal stream and runs
@@ -1125,8 +1330,8 @@ impl OutputStage {
 ///
 /// The renderer pulls frames from the queue its [`SyncedSource`] feeds,
 /// aligned to the server clock: it holds silence until the first queued
-/// audio is due, then drops or inserts frames to correct drift, and applies
-/// gain and the optional [`ProcessCallback`]. What it writes is final.
+/// audio is due, then corrects drift as its [`CorrectionMode`] says, and
+/// applies gain and the optional [`ProcessCallback`]. What it writes is final.
 ///
 /// # Example
 /// ```
@@ -1166,7 +1371,9 @@ pub struct SyncedRenderer {
     static_delay_us: Arc<AtomicU64>,
     output: OutputStage,
     correction: StartupCorrectionState,
+    correction_mode: CorrectionMode,
     last_frame: Vec<i32>,
+    reader: FractionalReader,
     schedule: CorrectionSchedule,
     insert_counter: u32,
     drop_counter: u32,
@@ -1233,8 +1440,10 @@ impl SyncedRenderer {
                 gain_control: gain.clone(),
                 process_callback,
             },
-            correction: StartupCorrectionState::new(),
+            correction: StartupCorrectionState::new(config.correction),
+            correction_mode: config.correction,
             last_frame: vec![i32::EQUILIBRIUM; channels],
+            reader: FractionalReader::new(channels),
             schedule: CorrectionSchedule::default(),
             insert_counter: 0,
             drop_counter: 0,
@@ -1339,6 +1548,7 @@ impl SyncedRenderer {
             self.schedule = CorrectionSchedule::default();
             self.insert_counter = 0;
             self.drop_counter = 0;
+            self.reader.reset();
             self.correction.reset();
             self.stats.reset_for_generation();
             for sample in self.last_frame.iter_mut() {
@@ -1472,6 +1682,7 @@ impl SyncedRenderer {
                             self.schedule = CorrectionSchedule::default();
                             self.insert_counter = 0;
                             self.drop_counter = 0;
+                            self.reader.reset();
                             // The cursor just jumped (e.g. a
                             // static-delay change, which does not
                             // bump the generation); prior
@@ -1701,6 +1912,7 @@ impl SyncedRenderer {
                     self.schedule = CorrectionSchedule::default();
                     self.insert_counter = 0;
                     self.drop_counter = 0;
+                    self.reader.reset();
                     self.stats.correction_updates = 0;
                     // The cursor just jumped; prior measurements
                     // describe the old timeline.
@@ -1749,7 +1961,26 @@ impl SyncedRenderer {
             let mut missing_frames = 0u64;
             let mut out_index = 0;
 
+            let smooth = self.correction_mode == CorrectionMode::Smooth;
+            let step = read_step(&self.schedule);
+
             for _ in 0..frames {
+                if smooth {
+                    let frame_out = &mut out[out_index..out_index + channels];
+                    out_index += channels;
+                    if !self.reader.read_frame(
+                        step,
+                        &mut self.last_frame,
+                        &mut queue,
+                        channels,
+                        sample_rate,
+                        frame_out,
+                    ) {
+                        missing_frames += 1;
+                    }
+                    continue;
+                }
+
                 if self.schedule.drop_every_n_frames > 0 {
                     self.drop_counter = self.drop_counter.saturating_sub(1);
                     if self.drop_counter == 0 {
@@ -1907,7 +2138,10 @@ impl SyncedRenderer {
 
 #[cfg(test)]
 mod tests {
-    use super::{static_delay_ms_to_us, PlaybackQueue, MAX_STATIC_DELAY_MS};
+    use super::{
+        read_step, static_delay_ms_to_us, FractionalReader, PlaybackQueue, MAX_STATIC_DELAY_MS,
+    };
+    use crate::audio::sync_correction::CorrectionSchedule;
     use crate::audio::{AudioBuffer, AudioFormat, Codec};
     use dasp_sample::Sample;
     use std::sync::Arc;
@@ -2075,6 +2309,145 @@ mod tests {
             "cursor should advance by exactly 10ms (10000us), got delta={}",
             queue.cursor_us - start_ts
         );
+    }
+
+    /// Ramp step per input frame, in sample units.
+    const RAMP_UNIT: i32 = 1_000;
+
+    /// A queue holding one stereo ramp of `frames` frames from `start_ts`:
+    /// frame `i` is `i * RAMP_UNIT` on the left and its negation on the right.
+    fn ramp_queue(start_ts: i64, frames: usize) -> PlaybackQueue {
+        let mut queue = PlaybackQueue::new();
+        let samples: Vec<i32> = (0..frames as i32)
+            .flat_map(|i| [i * RAMP_UNIT, -i * RAMP_UNIT])
+            .collect();
+        queue.push(AudioBuffer {
+            timestamp: start_ts,
+            samples: Arc::from(samples.into_boxed_slice()),
+            format: test_format(),
+        });
+        queue
+    }
+
+    /// A rendered sample as a position on the ramp, in input frames.
+    fn ramp_position(sample: f32) -> f64 {
+        f64::from(sample) * 2_147_483_648.0 / f64::from(RAMP_UNIT)
+    }
+
+    #[test]
+    fn test_fractional_reader_resamples_a_ramp_without_repeats_or_skips() {
+        let schedules = [
+            CorrectionSchedule {
+                drop_every_n_frames: 200,
+                ..CorrectionSchedule::default()
+            },
+            CorrectionSchedule {
+                insert_every_n_frames: 200,
+                ..CorrectionSchedule::default()
+            },
+            CorrectionSchedule {
+                drop_every_n_frames: 25,
+                ..CorrectionSchedule::default()
+            },
+        ];
+        const PLAIN: usize = 10;
+        const CORRECTING: usize = 96_000; // 2s at 48kHz
+        const AFTER: usize = 4_800;
+        let start_ts = 1_000_000i64;
+        let total_frames = 110_000;
+
+        for schedule in schedules {
+            let step = read_step(&schedule);
+            let mut queue = ramp_queue(start_ts, total_frames);
+            let mut reader = FractionalReader::new(2);
+            let mut last_frame = vec![i32::EQUILIBRIUM; 2];
+            let mut out = [0.0f32; 2];
+            let mut read = |step: f64, queue: &mut PlaybackQueue| {
+                assert!(reader.read_frame(step, &mut last_frame, queue, 2, 48_000, &mut out));
+                assert!((out[0] + out[1]).abs() < 1e-6, "channels stay apart");
+                ramp_position(out[0])
+            };
+
+            // Frame by frame first: whole input frames.
+            let mut positions = Vec::new();
+            for _ in 0..PLAIN {
+                positions.push(read(1.0, &mut queue));
+            }
+            assert_eq!(positions, (0..PLAIN).map(|i| i as f64).collect::<Vec<_>>());
+
+            // Correcting: each output moves exactly `step` along the ramp, so
+            // no input sample is repeated or skipped.
+            let mut previous = positions[PLAIN - 1];
+            for i in 0..CORRECTING {
+                let position = read(step, &mut queue);
+                assert!(
+                    (position - previous - step).abs() < 0.05,
+                    "step {step}: output {i} moved {} frames",
+                    position - previous
+                );
+                previous = position;
+            }
+
+            // Input is consumed at the planned rate, give or take the
+            // lookahead frame, and the cursor accounts for every frame read.
+            let planned = PLAIN as f64 + CORRECTING as f64 * step;
+            let consumed = total_frames - queue.queued_frames(2);
+            assert!(
+                (consumed as f64 - planned).abs() <= 1.0,
+                "step {step}: consumed {consumed} frames, planned {planned}"
+            );
+            assert_eq!(
+                queue.cursor_us,
+                start_ts + (consumed as i64 * 1_000_000) / 48_000,
+                "one frame read advances the cursor one frame"
+            );
+
+            // Back to frame by frame: the correction finishes on whole
+            // frames, never moving further from one frame per output than
+            // its own step did, then whole frames follow one at a time.
+            let excess = (step - 1.0).abs();
+            let finish_frames = (1.0 / excess).ceil() as usize + 1;
+            for i in 0..AFTER {
+                let position = read(1.0, &mut queue);
+                let moved = position - previous;
+                assert!(
+                    (moved - 1.0).abs() <= 2.0 * excess + 0.05,
+                    "step {step}: output {i} after the correction moved {moved} frames"
+                );
+                if i >= finish_frames {
+                    assert!((moved - 1.0).abs() < 0.05, "output {i} moved {moved}");
+                    assert!((position - position.round()).abs() < 0.05);
+                }
+                previous = position;
+            }
+        }
+    }
+
+    #[test]
+    fn test_fractional_reader_underrun_is_silent_and_resumes() {
+        let mut queue = ramp_queue(1_000_000, 3);
+        let mut reader = FractionalReader::new(2);
+        let mut last_frame = vec![i32::EQUILIBRIUM; 2];
+        let mut out = [f32::NAN; 2];
+        let step = 1.5;
+        // Reading starts from the frame before the queue's first.
+        assert!(reader.read_frame(step, &mut last_frame, &mut queue, 2, 48_000, &mut out));
+        assert_eq!(ramp_position(out[0]), 0.5);
+        assert!(reader.read_frame(step, &mut last_frame, &mut queue, 2, 48_000, &mut out));
+        assert_eq!(ramp_position(out[0]), 2.0);
+        // All three frames are read; the next position needs a fourth.
+        assert!(!reader.read_frame(step, &mut last_frame, &mut queue, 2, 48_000, &mut out));
+        assert_eq!(out, [0.0, 0.0]);
+        assert_eq!(queue.cursor_us, 1_000_000 + 3 * 1_000_000 / 48_000);
+
+        // Audio returns: reading resumes after the last frame read.
+        queue.push(AudioBuffer {
+            timestamp: queue.cursor_us,
+            samples: Arc::from(vec![7 * RAMP_UNIT, -7 * RAMP_UNIT].into_boxed_slice()),
+            format: test_format(),
+        });
+        assert!(reader.read_frame(1.0, &mut last_frame, &mut queue, 2, 48_000, &mut out));
+        assert_eq!(ramp_position(out[0]), 7.0);
     }
 
     #[test]
@@ -2673,7 +3046,7 @@ mod renderer_tests {
     // Drives a renderer the way an output's write loop would, with no
     // device: each render reports how long until its first frame is heard.
 
-    use super::{SyncedRenderer, SyncedRendererConfig, SyncedSource};
+    use super::{CorrectionMode, SyncedRenderer, SyncedRendererConfig, SyncedSource};
     use crate::audio::{AudioBuffer, AudioFormat, Codec};
     use crate::sync::{Clock, ClockSync, DefaultClock};
     use parking_lot::Mutex;
@@ -2806,10 +3179,28 @@ mod renderer_tests {
     }
 
     #[test]
+    fn smooth_correction_plays_in_sync_audio_unchanged() {
+        let mut h = Harness::new(SyncedRendererConfig {
+            correction: CorrectionMode::Smooth,
+            ..SyncedRendererConfig::new()
+        });
+        synchronize(&h.clock_sync, &h.clock);
+        let start = h.clock.now_micros() + 50_000;
+        h.source.enqueue(half_scale(start, 1_000));
+        h.render_heard_at(h.clock.now_micros());
+
+        let mut heard_at = start;
+        for _ in 0..10 {
+            let out = h.render_stream(&mut heard_at, 1);
+            assert!(out.iter().all(|&sample| sample == 0.5), "{out:?}");
+        }
+    }
+
+    #[test]
     fn source_volume_and_mute_reach_rendered_output() {
         let mut h = Harness::new(SyncedRendererConfig {
-            volume: 100,
             muted: true,
+            ..SyncedRendererConfig::new()
         });
         synchronize(&h.clock_sync, &h.clock);
         let start = h.clock.now_micros() + 50_000;

@@ -22,5 +22,7 @@ pub use pool::BufferPool;
 pub use sync_correction::{CorrectionPlanner, CorrectionSchedule};
 #[cfg(feature = "player")]
 pub use synced_player::{SyncedPlayer, SyncedPlayerConfig};
-pub use synced_renderer::{ProcessCallback, SyncedRenderer, SyncedRendererConfig, SyncedSource};
+pub use synced_renderer::{
+    CorrectionMode, ProcessCallback, SyncedRenderer, SyncedRendererConfig, SyncedSource,
+};
 pub use types::{AudioBuffer, AudioFormat, Codec};

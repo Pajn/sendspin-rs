@@ -2,8 +2,10 @@
 // ABOUTME: Uses DAC callback timestamps to drop/insert frames for alignment
 
 use crate::audio::gain::GainControl;
+use crate::audio::synced_renderer::{
+    CorrectionMode, SyncedRenderer, SyncedRendererConfig, SyncedSource,
+};
 pub use crate::audio::synced_renderer::{ProcessCallback, MAX_STATIC_DELAY_MS};
-use crate::audio::synced_renderer::{SyncedRenderer, SyncedRendererConfig, SyncedSource};
 use crate::audio::{AudioBuffer, AudioFormat};
 use crate::error::Error;
 use crate::sync::ClockSync;
@@ -161,6 +163,7 @@ impl SyncedPlayer {
             SyncedRendererConfig {
                 volume: config.volume,
                 muted: config.muted,
+                correction: CorrectionMode::default(),
             },
             process_callback,
         )?;
