@@ -3,7 +3,7 @@
 
 use crate::audio::gain::GainControl;
 pub use crate::audio::synced_renderer::{ProcessCallback, MAX_STATIC_DELAY_MS};
-use crate::audio::synced_renderer::{SyncedRenderer, SyncedSource};
+use crate::audio::synced_renderer::{SyncedRenderer, SyncedRendererConfig, SyncedSource};
 use crate::audio::{AudioBuffer, AudioFormat};
 use crate::error::Error;
 use crate::sync::ClockSync;
@@ -81,6 +81,10 @@ fn default_buffer_size(sample_rate: u32) -> cpal::BufferSize {
 }
 
 /// Synced audio output with drift correction.
+///
+/// Plays through a cpal output stream, running a [`SyncedRenderer`] in its
+/// data callback. To play through an output cpal does not drive, use a
+/// [`SyncedRenderer`] directly.
 pub struct SyncedPlayer {
     source: SyncedSource,
     _stream: Stream,
@@ -154,8 +158,10 @@ impl SyncedPlayer {
         let (source, renderer) = SyncedRenderer::build(
             format.clone(),
             clock_sync,
-            config.volume,
-            config.muted,
+            SyncedRendererConfig {
+                volume: config.volume,
+                muted: config.muted,
+            },
             process_callback,
         )?;
         let host = cpal::default_host();

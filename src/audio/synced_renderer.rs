@@ -33,10 +33,10 @@ use std::time::{Duration, Instant};
 ///
 /// # Why `Box<dyn>`?
 ///
-/// Using dynamic dispatch (`Box<dyn FnMut>`) keeps `SyncedPlayer` a concrete,
-/// non-generic type. This simplifies storage, trait object compatibility, and
-/// downstream usage at the cost of one vtable indirect call per audio callback
-/// (~1 ns vs the ~200 us callback budget).
+/// Using dynamic dispatch (`Box<dyn FnMut>`) keeps [`SyncedRenderer`] (and so
+/// `SyncedPlayer`) a concrete, non-generic type. This simplifies storage,
+/// trait object compatibility, and downstream usage at the cost of one vtable
+/// indirect call per audio callback (~1 ns vs the ~200 us callback budget).
 pub type ProcessCallback = Box<dyn FnMut(&mut [f32]) + Send + 'static>;
 
 /// Maximum static delay in milliseconds. The Sendspin protocol defines
@@ -899,9 +899,39 @@ impl CallbackStats {
     }
 }
 
-/// Control side of a synced output: the playback queue, volume/mute and
-/// static delay it shares with its [`SyncedRenderer`].
-pub(crate) struct SyncedSource {
+/// Configuration for [`SyncedRenderer`] construction.
+#[derive(Debug, Clone)]
+pub struct SyncedRendererConfig {
+    /// Initial playback volume, 0-100.
+    pub volume: u8,
+    /// Initial mute state.
+    pub muted: bool,
+}
+
+impl SyncedRendererConfig {
+    /// Create a config with common playback defaults.
+    pub fn new() -> Self {
+        Self {
+            volume: 100,
+            muted: false,
+        }
+    }
+}
+
+impl Default for SyncedRendererConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Control side of a [`SyncedRenderer`]: queues decoded audio for it and
+/// sets its volume, mute and static delay.
+///
+/// It shares its state with the renderer, so it can be used from any thread
+/// while the output's thread renders. Cloning is cheap and every clone
+/// controls the same renderer.
+#[derive(Clone)]
+pub struct SyncedSource {
     format: AudioFormat,
     queue: Arc<Mutex<PlaybackQueue>>,
     gain: GainControl,
@@ -914,7 +944,7 @@ impl SyncedSource {
     ///
     /// Scheduling uses `buffer.timestamp` (server time in microseconds) for
     /// drift-corrected playback.
-    pub(crate) fn enqueue(&self, buffer: AudioBuffer) {
+    pub fn enqueue(&self, buffer: AudioBuffer) {
         let buffer_timestamp = buffer.timestamp;
         let buffer_duration_us = buffer.duration_us();
         let channels = self.format.channels as usize;
@@ -956,7 +986,7 @@ impl SyncedSource {
     }
 
     /// Clear queued audio and reset playback state.
-    pub(crate) fn clear(&self) {
+    pub fn clear(&self) {
         let channels = self.format.channels as usize;
         let sample_rate = self.format.sample_rate;
 
@@ -988,13 +1018,41 @@ impl SyncedSource {
     }
 
     /// Return the configured audio format.
-    pub(crate) fn format(&self) -> &AudioFormat {
+    pub fn format(&self) -> &AudioFormat {
         &self.format
     }
 
     /// Get a reference to the volume/mute control.
-    pub(crate) fn gain_control(&self) -> &GainControl {
+    ///
+    /// Call `.clone()` if you need an owned handle to share across threads
+    /// (cloning is cheap — single `Arc` increment, no data copy).
+    pub fn gain_control(&self) -> &GainControl {
         &self.gain
+    }
+
+    // -- Volume/mute convenience methods --
+    //
+    // These promote the most common operations for ergonomics in simple
+    // use-cases. For full control, use `gain_control()` directly.
+
+    /// Current volume as 0-100.
+    pub fn volume(&self) -> u8 {
+        self.gain.volume()
+    }
+
+    /// Whether playback is currently muted.
+    pub fn is_muted(&self) -> bool {
+        self.gain.is_muted()
+    }
+
+    /// Set playback volume (0-100).
+    pub fn set_volume(&self, volume: u8) {
+        self.gain.set_volume(volume);
+    }
+
+    /// Set mute state.
+    pub fn set_mute(&self, muted: bool) {
+        self.gain.set_mute(muted);
     }
 
     /// Set the static playback delay in milliseconds (0–[`MAX_STATIC_DELAY_MS`]).
@@ -1008,7 +1066,7 @@ impl SyncedSource {
     /// Request a one-shot reanchor so the audio callback either skips forward or
     /// waits for the new target time instead of feeding the delay delta through
     /// pitch-shifting drift correction.
-    pub(crate) fn set_static_delay(&self, delay_ms: u16) {
+    pub fn set_static_delay(&self, delay_ms: u16) {
         self.static_delay_us
             .store(static_delay_ms_to_us(delay_ms), Ordering::Relaxed);
 
@@ -1019,7 +1077,7 @@ impl SyncedSource {
     }
 
     /// Current static delay in milliseconds.
-    pub(crate) fn static_delay_ms(&self) -> u16 {
+    pub fn static_delay_ms(&self) -> u16 {
         (self.static_delay_us.load(Ordering::Relaxed) / 1_000) as u16
     }
 }
@@ -1057,10 +1115,50 @@ impl OutputStage {
     }
 }
 
-/// Render side of a synced output: pulls frames from the queue its
-/// [`SyncedSource`] feeds, aligned to the server clock, with drift correction,
-/// gain and the optional process callback applied.
-pub(crate) struct SyncedRenderer {
+/// Synchronized playback for an output the caller drives.
+///
+/// [`SyncedPlayer`](crate::audio::SyncedPlayer) opens a cpal stream and runs
+/// a renderer in its data callback. Use a renderer directly when the output
+/// is something else, such as a platform audio API's write loop or render
+/// callback: call [`render`](Self::render) each time the output needs audio,
+/// with how long it will be until the first frame of that buffer is heard.
+///
+/// The renderer pulls frames from the queue its [`SyncedSource`] feeds,
+/// aligned to the server clock: it holds silence until the first queued
+/// audio is due, then drops or inserts frames to correct drift, and applies
+/// gain and the optional [`ProcessCallback`]. What it writes is final.
+///
+/// # Example
+/// ```
+/// # use std::sync::Arc;
+/// # use std::time::Duration;
+/// # use parking_lot::Mutex;
+/// # use sendspin::audio::{AudioFormat, Codec, SyncedRenderer, SyncedRendererConfig};
+/// # use sendspin::sync::ClockSync;
+/// # use sendspin::DefaultClock;
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let format = AudioFormat {
+///     codec: Codec::Pcm,
+///     sample_rate: 48_000,
+///     channels: 2,
+///     bit_depth: 24,
+///     codec_header: None,
+/// };
+/// let clock_sync = Arc::new(Mutex::new(ClockSync::new(Arc::new(DefaultClock::new()))));
+/// let (source, mut renderer) =
+///     SyncedRenderer::new(format, clock_sync, SyncedRendererConfig::new())?;
+///
+/// // Decoded audio goes to the source, from any thread...
+/// source.set_volume(80);
+///
+/// // ...and the output's thread renders 10ms at a time, here heard 20ms
+/// // after the call.
+/// let mut out = vec![0.0f32; 480 * 2];
+/// renderer.render(&mut out, Duration::from_millis(20));
+/// # Ok(())
+/// # }
+/// ```
+pub struct SyncedRenderer {
     channels: usize,
     sample_rate: u32,
     queue: Arc<Mutex<PlaybackQueue>>,
@@ -1082,12 +1180,36 @@ pub(crate) struct SyncedRenderer {
 }
 
 impl SyncedRenderer {
-    /// Create a source and the renderer that plays what it is fed.
+    /// Create a renderer and the [`SyncedSource`] that feeds and controls it.
+    ///
+    /// The renderer starts at the configured volume and mute state, with no
+    /// ramp from a default value. Fails if `format` has no channels.
+    pub fn new(
+        format: AudioFormat,
+        clock_sync: Arc<Mutex<ClockSync>>,
+        config: SyncedRendererConfig,
+    ) -> Result<(SyncedSource, Self), Error> {
+        Self::build(format, clock_sync, config, None)
+    }
+
+    /// Create a renderer with a process callback for post-gain audio
+    /// processing, and the [`SyncedSource`] that feeds and controls it.
+    ///
+    /// The callback receives samples **after** gain/mute processing has been
+    /// applied. See [`ProcessCallback`] for thread-safety requirements.
+    pub fn with_process_callback(
+        format: AudioFormat,
+        clock_sync: Arc<Mutex<ClockSync>>,
+        config: SyncedRendererConfig,
+        callback: ProcessCallback,
+    ) -> Result<(SyncedSource, Self), Error> {
+        Self::build(format, clock_sync, config, Some(callback))
+    }
+
     pub(crate) fn build(
         format: AudioFormat,
         clock_sync: Arc<Mutex<ClockSync>>,
-        volume: u8,
-        muted: bool,
+        config: SyncedRendererConfig,
         process_callback: Option<ProcessCallback>,
     ) -> Result<(SyncedSource, Self), Error> {
         if format.channels == 0 {
@@ -1096,7 +1218,7 @@ impl SyncedRenderer {
         let channels = format.channels as usize;
         let sample_rate = format.sample_rate;
         let queue = Arc::new(Mutex::new(PlaybackQueue::new()));
-        let gain = GainControl::new(volume, muted);
+        let gain = GainControl::new(config.volume, config.muted);
         let static_delay_us = Arc::new(AtomicU64::new(0));
 
         let renderer = Self {
@@ -1133,9 +1255,27 @@ impl SyncedRenderer {
         Ok((source, renderer))
     }
 
-    /// Fill `out` (interleaved f32) with the audio due when its first frame
-    /// is heard, `output_delay` from now.
-    pub(crate) fn render(&mut self, out: &mut [f32], output_delay: Duration) {
+    /// Fill `out` with the audio due when its first frame is heard,
+    /// `output_delay` from now.
+    ///
+    /// `out` is interleaved in the format's channel order and should hold a
+    /// whole number of frames; a trailing partial frame is filled with
+    /// silence. Samples are in -1.0..=1.0 with gain and the process callback
+    /// applied.
+    ///
+    /// `output_delay` is the time from this call until the first frame of
+    /// `out` reaches the listener: whatever the output has already queued
+    /// ahead of this buffer plus its own latency, as the platform reports it.
+    /// The renderer takes the current time itself, so the delay should be
+    /// measured as close to the call as practical. Report it consistently:
+    /// a delay that is off by a constant shifts playback against other
+    /// players by the same amount, and jitter in it is treated as drift.
+    ///
+    /// Call this from the output's thread, once per buffer it asks for. It
+    /// does not allocate. It shares the queue lock with the source, which
+    /// holds it only to insert or clear buffers, and it skips clock
+    /// synchronization for a buffer rather than wait for the clock lock.
+    pub fn render(&mut self, out: &mut [f32], output_delay: Duration) {
         let channels = self.channels;
         let sample_rate = self.sample_rate;
 
@@ -2525,5 +2665,234 @@ mod tests {
             .next_frame(2, 48_000)
             .expect("should return a frame from the next buffer, not panic");
         assert_eq!(frame[0], 222, "expected frame from the ahead buffer");
+    }
+}
+
+#[cfg(test)]
+mod renderer_tests {
+    // Drives a renderer the way an output's write loop would, with no
+    // device: each render reports how long until its first frame is heard.
+
+    use super::{SyncedRenderer, SyncedRendererConfig, SyncedSource};
+    use crate::audio::{AudioBuffer, AudioFormat, Codec};
+    use crate::sync::{Clock, ClockSync, DefaultClock};
+    use parking_lot::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    const SAMPLE_RATE: u32 = 48_000;
+    /// 10ms at [`SAMPLE_RATE`].
+    const FRAMES: usize = 480;
+    const FRAME_US: i64 = 1_000_000 / SAMPLE_RATE as i64;
+    /// Half of full scale: exactly 0.5 as f32.
+    const HALF_SCALE: i32 = 1 << 30;
+
+    fn test_format() -> AudioFormat {
+        AudioFormat {
+            codec: Codec::Pcm,
+            sample_rate: SAMPLE_RATE,
+            channels: 2,
+            bit_depth: 24,
+            codec_header: None,
+        }
+    }
+
+    /// `ms` milliseconds of a constant half-scale level starting at `timestamp`.
+    fn half_scale(timestamp: i64, ms: usize) -> AudioBuffer {
+        let samples = vec![HALF_SCALE; ms * SAMPLE_RATE as usize / 1000 * 2];
+        AudioBuffer {
+            timestamp,
+            samples: Arc::from(samples.into_boxed_slice()),
+            format: test_format(),
+        }
+    }
+
+    /// Two exchanges with no offset, so server time is the local clock.
+    fn synchronize(clock_sync: &Mutex<ClockSync>, clock: &DefaultClock) {
+        let mut sync = clock_sync.lock();
+        // The filter only needs increasing receive times; the clock's epoch
+        // may be its construction, so stay clear of zero.
+        let now = clock.now_micros().max(0) + 1;
+        for t1 in [now, now + 1_000] {
+            sync.update(t1, t1 + 50, t1 + 50, t1 + 100);
+        }
+        assert!(sync.is_synchronized());
+    }
+
+    struct Harness {
+        clock: Arc<DefaultClock>,
+        clock_sync: Arc<Mutex<ClockSync>>,
+        source: SyncedSource,
+        renderer: SyncedRenderer,
+        out: Vec<f32>,
+    }
+
+    impl Harness {
+        fn new(config: SyncedRendererConfig) -> Self {
+            Self::build(|format, clock_sync| SyncedRenderer::new(format, clock_sync, config))
+        }
+
+        fn build(
+            create: impl FnOnce(
+                AudioFormat,
+                Arc<Mutex<ClockSync>>,
+            )
+                -> Result<(SyncedSource, SyncedRenderer), crate::error::Error>,
+        ) -> Self {
+            let clock = Arc::new(DefaultClock::new());
+            let clock_sync = Arc::new(Mutex::new(ClockSync::new(clock.clone())));
+            let (source, renderer) = create(test_format(), Arc::clone(&clock_sync)).unwrap();
+            Self {
+                clock,
+                clock_sync,
+                source,
+                renderer,
+                out: vec![f32::NAN; FRAMES * 2],
+            }
+        }
+
+        /// Render one buffer whose first frame is heard at `heard_at`
+        /// (server time, which is the local clock once synchronized).
+        fn render_heard_at(&mut self, heard_at: i64) -> &[f32] {
+            let delay_us = (heard_at - self.clock.now_micros()).max(0) as u64;
+            self.renderer
+                .render(&mut self.out, Duration::from_micros(delay_us));
+            &self.out
+        }
+
+        /// Render the next `buffers` buffers of a gapless stream heard from
+        /// `*heard_at`, advancing it, and return the last one.
+        fn render_stream(&mut self, heard_at: &mut i64, buffers: usize) -> &[f32] {
+            for _ in 0..buffers {
+                self.render_heard_at(*heard_at);
+                *heard_at += FRAMES as i64 * FRAME_US;
+            }
+            &self.out
+        }
+    }
+
+    fn is_silent(out: &[f32]) -> bool {
+        out.iter().all(|&sample| sample == 0.0)
+    }
+
+    #[test]
+    fn renders_silence_until_queued_audio_is_due() {
+        let mut h = Harness::new(SyncedRendererConfig::new());
+        let now = h.clock.now_micros();
+
+        // Nothing queued.
+        assert!(is_silent(h.render_heard_at(now)));
+
+        // Audio due in 200ms, but the clock cannot place it yet.
+        let start = now + 200_000;
+        h.source.enqueue(half_scale(start, 1_000));
+        assert!(is_silent(h.render_heard_at(now)));
+
+        // Synchronized: the first render anchors the cursor and stays silent
+        // for its own period, then the start gate holds silence while the
+        // audio is still ahead of when the output would play it.
+        synchronize(&h.clock_sync, &h.clock);
+        let now = h.clock.now_micros();
+        assert!(is_silent(h.render_heard_at(now)));
+        assert!(is_silent(h.render_heard_at(now + 10_000)));
+
+        // A buffer heard when the audio is due plays it from its first frame.
+        let mut heard_at = start;
+        let out = h.render_stream(&mut heard_at, 1);
+        assert!(out.iter().all(|&sample| sample == 0.5), "{out:?}");
+        let out = h.render_stream(&mut heard_at, 1);
+        assert!(out.iter().all(|&sample| sample == 0.5), "{out:?}");
+    }
+
+    #[test]
+    fn source_volume_and_mute_reach_rendered_output() {
+        let mut h = Harness::new(SyncedRendererConfig {
+            volume: 100,
+            muted: true,
+        });
+        synchronize(&h.clock_sync, &h.clock);
+        let start = h.clock.now_micros() + 50_000;
+        h.source.enqueue(half_scale(start, 1_000));
+        h.render_heard_at(h.clock.now_micros());
+
+        // Muted from the first buffer, with no ramp from a default gain.
+        let mut heard_at = start;
+        assert!(is_silent(h.render_stream(&mut heard_at, 1)));
+
+        // Unmuting ramps up over 20ms (two buffers), then plays at unity.
+        h.source.set_mute(false);
+        let ramp = h.render_stream(&mut heard_at, 1).to_vec();
+        assert!(ramp[0] > 0.0 && ramp[0] < ramp[ramp.len() - 1], "{ramp:?}");
+        let out = h.render_stream(&mut heard_at, 2);
+        assert!(out.iter().all(|&sample| sample == 0.5), "{out:?}");
+
+        // A volume change through the source settles at its gain.
+        h.source.set_volume(50);
+        let gain = h.source.gain_control().gain();
+        assert!(gain > 0.0 && gain < 1.0);
+        let out = h.render_stream(&mut heard_at, 3);
+        assert!(
+            out.iter().all(|&sample| (sample - 0.5 * gain).abs() < 1e-6),
+            "{out:?}"
+        );
+
+        // A clone controls the same renderer.
+        h.source.clone().set_mute(true);
+        assert!(h.source.is_muted());
+        assert!(is_silent(h.render_stream(&mut heard_at, 3)));
+    }
+
+    #[test]
+    fn process_callback_output_is_final_including_silence() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let calls_in_callback = Arc::clone(&calls);
+        let mut h = Harness::build(|format, clock_sync| {
+            SyncedRenderer::with_process_callback(
+                format,
+                clock_sync,
+                SyncedRendererConfig::new(),
+                Box::new(move |data| {
+                    calls_in_callback.fetch_add(1, Ordering::Relaxed);
+                    for sample in data {
+                        *sample = -*sample;
+                    }
+                }),
+            )
+        });
+
+        // Called for pre-start silence too.
+        assert!(is_silent(h.render_heard_at(h.clock.now_micros())));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        synchronize(&h.clock_sync, &h.clock);
+        let start = h.clock.now_micros() + 50_000;
+        h.source.enqueue(half_scale(start, 1_000));
+        h.render_heard_at(h.clock.now_micros());
+        let mut heard_at = start;
+        let out = h.render_stream(&mut heard_at, 1);
+        assert!(out.iter().all(|&sample| sample == -0.5), "{out:?}");
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn renderer_moves_to_the_output_thread_and_source_is_shared() {
+        fn assert_send<T: Send>() {}
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send::<SyncedRenderer>();
+        assert_send_sync::<SyncedSource>();
+    }
+
+    #[test]
+    fn rejects_zero_channels() {
+        let format = AudioFormat {
+            channels: 0,
+            ..test_format()
+        };
+        let clock_sync = Arc::new(Mutex::new(ClockSync::new(Arc::new(DefaultClock::new()))));
+        assert!(
+            SyncedRenderer::new(format, clock_sync, SyncedRendererConfig::new()).is_err(),
+            "channels=0 should be rejected"
+        );
     }
 }
