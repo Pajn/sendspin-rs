@@ -3,7 +3,7 @@
 
 use crate::audio::decode::Decoder;
 use crate::error::Error;
-use cpal::Sample;
+use dasp_sample::Sample;
 use std::sync::Arc;
 
 /// PCM endianness
@@ -89,7 +89,7 @@ impl Decoder for PcmDecoder {
                     .iter()
                     .map(|c| {
                         let extended = i32::from_i24_le([c[0], c[1], c[2]]);
-                        i32::from_sample(cpal::I24::new_unchecked(extended))
+                        i32::from_sample(dasp_sample::I24::new_unchecked(extended))
                     })
                     .collect();
                 Ok(Arc::from(samples.into_boxed_slice()))
@@ -101,7 +101,7 @@ impl Decoder for PcmDecoder {
                     .iter()
                     .map(|c| {
                         let extended = i32::from_i24_be([c[0], c[1], c[2]]);
-                        i32::from_sample(cpal::I24::new_unchecked(extended))
+                        i32::from_sample(dasp_sample::I24::new_unchecked(extended))
                     })
                     .collect();
                 Ok(Arc::from(samples.into_boxed_slice()))

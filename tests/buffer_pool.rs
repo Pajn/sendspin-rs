@@ -1,6 +1,6 @@
-#![cfg(feature = "player")]
+#![cfg(feature = "renderer")]
 
-use cpal::Sample;
+use dasp_sample::Sample;
 use sendspin::audio::BufferPool;
 
 #[test]

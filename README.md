@@ -40,7 +40,8 @@ Hyper-efficient Rust implementation of the [Sendspin Protocol](https://github.co
 | Feature | Default | What it adds |
 |---|---|---|
 | `client` | yes | The WebSocket client, its builder, the inbound listener and the connection manager (Tokio, tungstenite) |
-| `player` | yes | PCM, FLAC and Opus decoders and synchronized output through cpal |
+| `renderer` | yes | PCM, FLAC and Opus decoders and synchronized playback (`SyncedRenderer`) for an output the application drives, without cpal |
+| `player` | yes | Synchronized output through cpal (`SyncedPlayer`); implies `renderer` |
 | `native-tls` | no | TLS for the listener and `wss://` connections; implies `client` |
 
 With `default-features = false` the crate is the protocol message types and clock
@@ -50,6 +51,15 @@ implementation needs:
 ```toml
 [dependencies]
 sendspin = { version = "0.3", default-features = false }
+```
+
+An application that plays through its own audio output (a platform audio API rather
+than cpal) can use `renderer` in place of `player` and feed `SyncedRenderer::render`
+from its output's callback or write loop:
+
+```toml
+[dependencies]
+sendspin = { version = "0.3", default-features = false, features = ["client", "renderer"] }
 ```
 
 ## Installing build dependencies

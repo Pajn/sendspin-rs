@@ -1,4 +1,4 @@
-#![cfg(feature = "player")]
+#![cfg(feature = "renderer")]
 
 use sendspin::audio::{CorrectionPlanner, CorrectionSchedule};
 

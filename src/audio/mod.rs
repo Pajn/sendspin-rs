@@ -9,7 +9,8 @@ pub mod gain;
 pub mod pool;
 /// Sync correction planner for drop/insert cadence
 pub mod sync_correction;
-/// Synced playback helper using output timestamps
+/// Synced playback through a cpal output stream
+#[cfg(feature = "player")]
 pub mod synced_player;
 /// Synced playback for an output the caller drives
 pub mod synced_renderer;
@@ -19,6 +20,7 @@ pub mod types;
 pub use gain::GainControl;
 pub use pool::BufferPool;
 pub use sync_correction::{CorrectionPlanner, CorrectionSchedule};
-pub use synced_player::{ProcessCallback, SyncedPlayer, SyncedPlayerConfig};
-pub use synced_renderer::{SyncedRenderer, SyncedRendererConfig, SyncedSource};
+#[cfg(feature = "player")]
+pub use synced_player::{SyncedPlayer, SyncedPlayerConfig};
+pub use synced_renderer::{ProcessCallback, SyncedRenderer, SyncedRendererConfig, SyncedSource};
 pub use types::{AudioBuffer, AudioFormat, Codec};

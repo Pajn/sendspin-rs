@@ -44,6 +44,7 @@ workspace = false
 script = '''
 cargo clippy --all-targets --no-default-features -- -D warnings
 cargo clippy --all-targets --no-default-features --features client -- -D warnings
+cargo clippy --all-targets --no-default-features --features renderer -- -D warnings
 cargo clippy --all-targets --no-default-features --features player -- -D warnings
 '''
 

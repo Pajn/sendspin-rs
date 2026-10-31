@@ -1,8 +1,8 @@
 // ABOUTME: Buffer pool for reusing audio sample buffers
 // ABOUTME: Eliminates allocations in the audio hot path
 
-use cpal::Sample;
 use crossbeam::queue::ArrayQueue;
+use dasp_sample::Sample;
 use std::sync::Arc;
 
 /// Buffer pool for reusing audio sample buffers

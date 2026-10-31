@@ -54,9 +54,9 @@ impl AudioFormat {
 
 /// Audio buffer with a server-loop timestamp (zero-copy via Arc).
 ///
-/// Scheduling keys on `timestamp`; [`SyncedPlayer`](crate::audio::SyncedPlayer)
-/// converts it to a local playback instant live in the output callback, applying
-/// the current clock-sync estimate at play time rather than baking it in here.
+/// Scheduling keys on `timestamp`; [`SyncedRenderer`](crate::audio::SyncedRenderer)
+/// converts it to a local playback instant live as it renders, applying the
+/// current clock-sync estimate at play time rather than baking it in here.
 pub struct AudioBuffer {
     /// Server loop timestamp in microseconds.
     pub timestamp: i64,

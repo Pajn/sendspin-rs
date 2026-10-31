@@ -9,7 +9,7 @@ use crate::audio::{AudioBuffer, AudioFormat};
 use crate::error::Error;
 use crate::log_sampling::should_log_sample;
 use crate::sync::ClockSync;
-use cpal::Sample;
+use dasp_sample::Sample;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1117,7 +1117,7 @@ impl OutputStage {
 
 /// Synchronized playback for an output the caller drives.
 ///
-/// [`SyncedPlayer`](crate::audio::SyncedPlayer) opens a cpal stream and runs
+/// `SyncedPlayer` (the `player` feature) opens a cpal stream and runs
 /// a renderer in its data callback. Use a renderer directly when the output
 /// is something else, such as a platform audio API's write loop or render
 /// callback: call [`render`](Self::render) each time the output needs audio,
@@ -1909,7 +1909,7 @@ impl SyncedRenderer {
 mod tests {
     use super::{static_delay_ms_to_us, PlaybackQueue, MAX_STATIC_DELAY_MS};
     use crate::audio::{AudioBuffer, AudioFormat, Codec};
-    use cpal::Sample;
+    use dasp_sample::Sample;
     use std::sync::Arc;
 
     /// Standard test format: 48kHz stereo 24-bit PCM.

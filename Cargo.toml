@@ -21,14 +21,17 @@ client = [
     "dep:typed-builder",
     "dep:parking_lot",
 ]
-# Decoders and synchronized audio output through cpal.
-player = [
-    "dep:cpal",
+# Decoders and synchronized playback through an output the caller drives
+# (`SyncedRenderer`), without cpal.
+renderer = [
     "dep:flac-codec",
     "dep:opus-rs",
+    "dep:dasp_sample",
     "dep:crossbeam",
     "dep:parking_lot",
 ]
+# Synchronized audio output through cpal (`SyncedPlayer`).
+player = ["renderer", "dep:cpal"]
 native-tls = [
     "client",
     "tokio-tungstenite/native-tls",
@@ -57,6 +60,9 @@ uuid = { version = "1.23", features = ["v4", "serde"], optional = true }
 
 # Audio output
 cpal = { version = "0.18", optional = true }
+
+# Sample conversions (the ones cpal re-exports)
+dasp_sample = { version = "0.11", optional = true }
 
 # Audio codecs
 flac-codec = { version = "=1.3.2", optional = true }

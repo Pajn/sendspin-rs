@@ -60,6 +60,8 @@ jobs:
             args: --no-default-features
           - features: client
             args: --no-default-features --features client
+          - features: renderer
+            args: --no-default-features --features renderer
           - features: player
             args: --no-default-features --features player
             alsa: true

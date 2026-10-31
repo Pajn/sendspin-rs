@@ -1,7 +1,7 @@
 // ABOUTME: FLAC decoder conformance tests against the reference implementation
 // ABOUTME: Tripwire for regressions in the pinned flac-codec dependency
 
-#![cfg(feature = "player")]
+#![cfg(feature = "renderer")]
 
 //! Conformance tests for [`FlacDecoder`].
 //!
